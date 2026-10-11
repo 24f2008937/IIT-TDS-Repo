@@ -37,16 +37,12 @@ def execute_python_code(code: str) -> dict:
         sys.stdout = old_stdout
 
 def analyze_error_with_ai(code: str, traceback_str: str) -> List[int]:
-    try:
-        token = os.environ.get("AIPIPE_TOKEN") or os.environ.get("OPENAI_API_KEY")
-        print(f"DEBUG: Token present: {bool(token)}")
-        
-        client = OpenAI(
-            base_url="https://aipipe.org/openai/v1",
-            api_key=token
-        )
+  try:
+    token = os.environ.get("AIPIPE_TOKEN") or os.environ.get("OPENAI_API_KEY")
 
-        prompt = f"""
+    client = OpenAI(base_url="https://aipipe.org/openai/v1", api_key=token)
+
+    prompt = f"""
 Analyze this Python code and its error traceback.
 Identify the line number(s) where the error occurred.
 Return a JSON object with a single key "error_lines" containing a list of integer line numbers.
@@ -58,18 +54,20 @@ TRACEBACK:
 {traceback_str}
 """
 
-        response = client.chat.completions.create(
-            model="openai/gpt-4.1-nano",
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
-        )
-        content = response.choices[0].message.content
-        print(f"DEBUG: AI response content: {content}")
-        data = json.loads(content)
-        return data.get("error_lines", [])
-    except Exception as e:
-        print(f"AI Error Analysis Exception: {traceback.format_exc()}")
-        return []
+    response = client.chat.completions.create(
+        model="openai/gpt-4.1-nano",
+        messages=[{"role": "user", "content": prompt}],
+        response_format={"type": "json_object"},
+    )
+    content = response.choices[0].message.content
+    print(f"DEBUG: AI response content: {content}")
+    data = json.loads(content)
+    return data.get("error_lines", [])
+  except Exception as e:
+    # Print the exact error to Vercel logs
+    print(f"AI Error Analysis Exception: {repr(e)}")
+    print(traceback.format_exc())
+    return []
 
 @app.post("/code-interpreter")
 @app.post("")
@@ -87,3 +85,4 @@ async def code_interpreter(req: CodeRequest):
             "error": error_lines,
             "result": exec_result["output"]
         }
+
