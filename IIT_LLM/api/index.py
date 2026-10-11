@@ -38,9 +38,12 @@ def execute_python_code(code: str) -> dict:
 
 def analyze_error_with_ai(code: str, traceback_str: str) -> List[int]:
     try:
+        token = os.environ.get("AIPIPE_TOKEN") or os.environ.get("OPENAI_API_KEY")
+        print(f"DEBUG: Token present: {bool(token)}")
+        
         client = OpenAI(
             base_url="https://aipipe.org/openai/v1",
-            api_key=os.environ.get("AIPIPE_TOKEN") or os.environ.get("OPENAI_API_KEY")
+            api_key=token
         )
 
         prompt = f"""
@@ -60,9 +63,12 @@ TRACEBACK:
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
         )
-        data = json.loads(response.choices[0].message.content)
+        content = response.choices[0].message.content
+        print(f"DEBUG: AI response content: {content}")
+        data = json.loads(content)
         return data.get("error_lines", [])
-    except Exception:
+    except Exception as e:
+        print(f"AI Error Analysis Exception: {traceback.format_exc()}")
         return []
 
 @app.post("/code-interpreter")
