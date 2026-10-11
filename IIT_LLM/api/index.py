@@ -6,6 +6,7 @@ import os
 import sys
 from io import StringIO
 import traceback
+import json
 from openai import OpenAI
 
 app = FastAPI()
@@ -20,9 +21,6 @@ app.add_middleware(
 
 class CodeRequest(BaseModel):
     code: str
-
-class ErrorAnalysis(BaseModel):
-    error_lines: List[int]
 
 def execute_python_code(code: str) -> dict:
     old_stdout = sys.stdout
@@ -48,24 +46,23 @@ def analyze_error_with_ai(code: str, traceback_str: str) -> List[int]:
         prompt = f"""
 Analyze this Python code and its error traceback.
 Identify the line number(s) where the error occurred.
+Return a JSON object with a single key "error_lines" containing a list of integer line numbers.
 
 CODE:
 {code}
 
 TRACEBACK:
 {traceback_str}
-
-Return the line number(s) where the error is located.
 """
 
-        response = client.beta.chat.completions.parse(
-            model="openai/gpt-4.1-nano",  # ensure correct model identifier format for AI Pipe
+        response = client.chat.completions.create(
+            model="openai/gpt-4.1-nano",
             messages=[{"role": "user", "content": prompt}],
-            response_format=ErrorAnalysis,
+            response_format={"type": "json_object"},
         )
-        return response.choices[0].message.parsed.error_lines
+        data = json.loads(response.choices[0].message.content)
+        return data.get("error_lines", [])
     except Exception:
-        # Fallback if API fails or model string differs
         return []
 
 @app.post("/code-interpreter")
