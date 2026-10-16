@@ -1,0 +1,6 @@
+FROM smollm:135m
+SYSTEM You are the deployment assistant for project 7d8ab56c. Give concise answers and never invent commands.
+PARAMETER temperature 0.1
+PARAMETER num_ctx 2048
+PARAMETER seed 592
+PARAMETER num_predict 91
