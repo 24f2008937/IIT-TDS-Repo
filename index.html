@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Aaditya Chaturvedy | Portfolio &amp; Projects</title>
+  <meta name="description" content="Showcase of data science, web services, and automation engineering projects by Aaditya Chaturvedy.">
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card-bg: #1e293b;
+      --card-border: #334155;
+      --accent: #38bdf8;
+      --accent-hover: #0ea5e9;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --tag-bg: #0369a1;
+      --tag-text: #e0f2fe;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      padding: 3rem 1.5rem 2rem;
+      max-width: 960px;
+      margin: 0 auto;
+      width: 100%;
+    }
+
+    .badge {
+      display: inline-block;
+      font-size: 0.85rem;
+      padding: 0.25rem 0.75rem;
+      border-radius: 9999px;
+      background: rgba(56, 189, 248, 0.15);
+      color: var(--accent);
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      margin-bottom: 1rem;
+      font-weight: 500;
+    }
+
+    h1 {
+      font-size: 2.5rem;
+      font-weight: 800;
+      letter-spacing: -0.025em;
+      margin-bottom: 0.5rem;
+      background: linear-gradient(to right, #ffffff, #94a3b8);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .subtitle {
+      font-size: 1.15rem;
+      color: var(--text-muted);
+      max-width: 650px;
+      margin-bottom: 1.25rem;
+    }
+
+    .contact-bar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1rem;
+      align-items: center;
+      font-size: 0.95rem;
+      color: var(--text-muted);
+      padding: 0.75rem 1rem;
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      width: fit-content;
+    }
+
+    .contact-bar a {
+      color: var(--accent);
+      text-decoration: none;
+      transition: color 0.2s;
+    }
+
+    .contact-bar a:hover {
+      color: var(--accent-hover);
+      text-decoration: underline;
+    }
+
+    main {
+      flex: 1;
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 1rem 1.5rem 3rem;
+      width: 100%;
+    }
+
+    .section-title {
+      font-size: 1.5rem;
+      font-weight: 700;
+      margin-bottom: 1.5rem;
+      padding-bottom: 0.5rem;
+      border-bottom: 1px solid var(--card-border);
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 1.5rem;
+      margin-bottom: 3rem;
+    }
+
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 1.5rem;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      transition: transform 0.2s, border-color 0.2s;
+    }
+
+    .card:hover {
+      transform: translateY(-2px);
+      border-color: var(--accent);
+    }
+
+    .card h3 {
+      font-size: 1.25rem;
+      margin-bottom: 0.75rem;
+      color: #fff;
+    }
+
+    .card p {
+      font-size: 0.95rem;
+      color: var(--text-muted);
+      margin-bottom: 1.25rem;
+      flex: 1;
+    }
+
+    .tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+
+    .tag {
+      font-size: 0.75rem;
+      padding: 0.2rem 0.6rem;
+      border-radius: 6px;
+      background: rgba(56, 189, 248, 0.1);
+      color: var(--accent);
+      font-weight: 500;
+    }
+
+    .skills-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 1rem;
+    }
+
+    .skill-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      padding: 1rem;
+    }
+
+    .skill-card h4 {
+      font-size: 1rem;
+      color: var(--accent);
+      margin-bottom: 0.5rem;
+    }
+
+    .skill-card ul {
+      list-style-type: none;
+      font-size: 0.9rem;
+      color: var(--text-muted);
+    }
+
+    .skill-card li {
+      margin-bottom: 0.25rem;
+    }
+
+    footer {
+      border-top: 1px solid var(--card-border);
+      padding: 2rem 1.5rem;
+      text-align: center;
+      font-size: 0.875rem;
+      color: var(--text-muted);
+      background: #090d16;
+    }
+
+    footer a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+
+    footer a:hover {
+      text-decoration: underline;
+    }
+
+    @media (max-width: 640px) {
+      h1 {
+        font-size: 2rem;
+      }
+      .contact-bar {
+        width: 100%;
+        flex-direction: column;
+        align-items: flex-start;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="badge">IIT Madras &bull; Tools in Data Science</div>
+    <h1>Aaditya Chaturvedy</h1>
+    <p class="subtitle">
+      Data Science student and software engineer focusing on backend systems, AI applications, automated data pipelines, and developer tooling.
+    </p>
+    <div class="contact-bar">
+      <span><strong>Email:</strong> <a href="mailto:24f2008937@ds.study.iitm.ac.in"><!--email_off-->24f2008937@ds.study.iitm.ac.in<!--/email_off--></a></span>
+      <span>&bull;</span>
+      <span><strong>GitHub:</strong> <a href="https://github.com/24f2008937/IIT-TDS-Repo" target="_blank" rel="noopener noreferrer">24f2008937/IIT-TDS-Repo</a></span>
+    </div>
+  </header>
+
+  <main>
+    <section>
+      <h2 class="section-title">Featured Projects &amp; Work</h2>
+      <div class="grid">
+        <article class="card">
+          <div>
+            <h3>AI Code Interpreter &amp; Error Analyzer</h3>
+            <p>
+              A high-performance FastAPI service that dynamically executes user-submitted Python code in an isolated environment, captures stdout, and leverages LLM integration (OpenAI / AIPipe) to pinpoint error line numbers with regex trace analysis.
+            </p>
+          </div>
+          <div class="tags">
+            <span class="tag">FastAPI</span>
+            <span class="tag">Python</span>
+            <span class="tag">OpenAI API</span>
+            <span class="tag">Vercel</span>
+          </div>
+        </article>
+
+        <article class="card">
+          <div>
+            <h3>Data Pipeline &amp; JSON Sanitizer</h3>
+            <p>
+              Automated data extraction and cleansing scripts to repair corrupted and malformed JSON data, normalize nested schema fields, and produce structured formats for downstream analytical reporting.
+            </p>
+          </div>
+          <div class="tags">
+            <span class="tag">Data Wrangling</span>
+            <span class="tag">Python</span>
+            <span class="tag">JSON</span>
+            <span class="tag">ETL</span>
+          </div>
+        </article>
+
+        <article class="card">
+          <div>
+            <h3>File Operations &amp; Unicode Processing</h3>
+            <p>
+              Multi-file automated batch transformations, directory restructuring, and UTF-8/Unicode data normalization routines ensuring file integrity across cross-platform systems.
+            </p>
+          </div>
+          <div class="tags">
+            <span class="tag">Automation</span>
+            <span class="tag">Bash</span>
+            <span class="tag">Unicode</span>
+            <span class="tag">Regex</span>
+          </div>
+        </article>
+
+        <article class="card">
+          <div>
+            <h3>CI/CD &amp; Serverless Benchmarking</h3>
+            <p>
+              Continuous integration workflows powered by GitHub Actions for automated linting, test suites, and latency benchmarking of serverless cloud functions.
+            </p>
+          </div>
+          <div class="tags">
+            <span class="tag">GitHub Actions</span>
+            <span class="tag">CI/CD</span>
+            <span class="tag">DevOps</span>
+            <span class="tag">Benchmarking</span>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section>
+      <h2 class="section-title">Technical Expertise</h2>
+      <div class="skills-grid">
+        <div class="skill-card">
+          <h4>Languages</h4>
+          <ul>
+            <li>Python</li>
+            <li>JavaScript / HTML / CSS</li>
+            <li>SQL</li>
+            <li>Bash &amp; Shell Scripting</li>
+          </ul>
+        </div>
+        <div class="skill-card">
+          <h4>Frameworks &amp; APIs</h4>
+          <ul>
+            <li>FastAPI &amp; Pydantic</li>
+            <li>OpenAI API / LLM Prompting</li>
+            <li>RESTful APIs</li>
+            <li>Vercel Serverless</li>
+          </ul>
+        </div>
+        <div class="skill-card">
+          <h4>Developer Tools</h4>
+          <ul>
+            <li>Git &amp; GitHub</li>
+            <li>GitHub Actions CI/CD</li>
+            <li>GitHub Pages</li>
+            <li>Linux / macOS CLI</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <p>
+      &copy; 2026 Aaditya Chaturvedy &bull;
+      <span><!--email_off-->24f2008937@ds.study.iitm.ac.in<!--/email_off--></span> &bull;
+      <a href="https://github.com/24f2008937/IIT-TDS-Repo" target="_blank" rel="noopener noreferrer">Repository</a>
+    </p>
+  </footer>
+</body>
+</html>
