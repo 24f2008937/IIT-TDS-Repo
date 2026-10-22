@@ -171,12 +171,35 @@ async def test_mailroom():
         print("DEBUG invalid base64 signature commit:", res_bad_sig.status_code, res_bad_sig.text)
         assert res_bad_sig.status_code == 400, f"Expected 400 for bad signature, got {res_bad_sig.status_code}"
 
-        # 64-byte forged signature
-        bad_receipts_64 = [dict(r) for r in receipts]
-        bad_receipts_64[0]["receiptSignature"] = base64.b64encode(b"Z"*64).decode("utf-8")
-        bad_commit_64 = dict(commit_body)
-        bad_commit_64["receipts"] = bad_receipts_64
-        res_bad_sig_64 = await client.post("/v1/mailroom/actions", json=bad_commit_64)
+        # Fresh evaluation for forged signature test
+        eval_id2 = f"eval_{uuid.uuid4().hex[:8]}"
+        p_body2 = dict(propose_body)
+        p_body2["evaluationId"] = eval_id2
+        res2 = await client.post("/v1/mailroom/actions", json=p_body2)
+        assert res2.status_code == 200
+        p_data2 = res2.json()
+        props2 = p_data2["proposals"]
+
+        bad_receipts_64 = []
+        for prop in props2:
+            bad_receipts_64.append({
+                "dossierId": prop["dossierId"],
+                "callId": prop["callId"],
+                "action": prop["action"],
+                "accepted": True,
+                "proposalDigest": compute_proposal_digest(prop),
+                "receiptId": f"nonce_{uuid.uuid4().hex[:12]}",
+                "receiptSignature": base64.b64encode(b"Z"*64).decode("utf-8")
+            })
+
+        commit_body2 = {
+            "profile": "ga5-mailroom-action-gate/v2",
+            "operation": "commit",
+            "evaluationId": eval_id2,
+            "inputDigest": p_data2["inputDigest"],
+            "receipts": bad_receipts_64
+        }
+        res_bad_sig_64 = await client.post("/v1/mailroom/actions", json=commit_body2)
         print("DEBUG 64-byte forged signature commit:", res_bad_sig_64.status_code, res_bad_sig_64.text)
         assert res_bad_sig_64.status_code == 400, f"Expected 400 for forged signature, got {res_bad_sig_64.status_code}"
         print("Invalid receipt signatures (both malformed and forged) correctly mapped to 400 Bad Request! ✅")
