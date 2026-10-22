@@ -51,12 +51,14 @@ def kvdb_post_sync(key: str, data: Any):
         print(f"kvdb_post_sync error: {e}")
 
 def kvdb_get_sync(key: str) -> Optional[Any]:
-    try:
-        res = httpx.get(f"{KVDB_URL}/{key}", timeout=2.5)
-        if res.status_code == 200:
-            return res.json()
-    except Exception as e:
-        print(f"kvdb_get_sync error: {e}")
+    for attempt in range(2):
+        try:
+            res = httpx.get(f"{KVDB_URL}/{key}", timeout=3.5)
+            if res.status_code == 200:
+                return res.json()
+        except Exception as e:
+            print(f"kvdb_get_sync attempt {attempt} error: {e}")
+            time.sleep(0.05)
     return None
 
 def try_acquire_task_lock(task_id: str) -> bool:
@@ -157,7 +159,13 @@ def db_save_task(task_id: str, principal: str, context_id: str, state: str, task
 
     # Sync to KVdb
     kvdb_post_sync(safe_key("task", task_id), record)
-    kvdb_post_sync(safe_key("utask", principal, task_id), {"id": task_id, "updatedAt": now})
+    compact_summary = {
+        "id": task_id,
+        "contextId": context_id,
+        "status": task.get("status", {"state": state}),
+        "updatedAt": now
+    }
+    kvdb_post_sync(safe_key("utask", principal, task_id), compact_summary)
 
     # Backup to SQLite
     try:
@@ -214,35 +222,57 @@ def db_load_task(task_id: str, force_remote: bool = False) -> Optional[dict]:
 def db_list_user_tasks(principal: str) -> List[dict]:
     tasks_map = {}
 
+    # 1. Local in-memory cache (compact)
     for tid, rec in TASK_CACHE.items():
         if rec.get("principal") == principal:
-            tasks_map[tid] = rec["task"]
+            t = rec.get("task", {})
+            tasks_map[tid] = {
+                "id": tid,
+                "contextId": rec.get("contextId", t.get("contextId", "")),
+                "status": t.get("status", {"state": rec.get("state", "TASK_STATE_INPUT_REQUIRED")})
+            }
 
+    # 2. KVdb single batch fetch via values=true (fast & compact)
+    p_prefix = safe_key("utask", principal) + "_"
+    try:
+        res = httpx.get(f"{KVDB_URL}/?prefix={p_prefix}&values=true", timeout=3.5)
+        if res.status_code == 200:
+            for line in res.text.splitlines():
+                line = line.strip()
+                if not line or "=" not in line:
+                    continue
+                _, v_str = line.split("=", 1)
+                try:
+                    v = json.loads(v_str)
+                    tid = v.get("id")
+                    if tid and tid not in tasks_map:
+                        tasks_map[tid] = {
+                            "id": tid,
+                            "contextId": v.get("contextId", ""),
+                            "status": v.get("status", {"state": "TASK_STATE_COMPLETED"})
+                        }
+                except Exception:
+                    pass
+    except Exception as e:
+        print(f"db_list_user_tasks kvdb error: {e}")
+
+    # 3. Local SQLite
     try:
         init_db()
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
-        cur.execute("SELECT id, task_json FROM tasks WHERE principal = ? ORDER BY created_at DESC", (principal,))
+        cur.execute("SELECT id, context_id, state FROM tasks WHERE principal = ? ORDER BY created_at DESC", (principal,))
         for row in cur.fetchall():
-            if row[0] not in tasks_map:
-                tasks_map[row[0]] = json.loads(row[1])
+            tid = row[0]
+            if tid not in tasks_map:
+                tasks_map[tid] = {
+                    "id": tid,
+                    "contextId": row[1],
+                    "status": {"state": row[2]}
+                }
         conn.close()
     except Exception as e:
         print(f"db_list_user_tasks sqlite error: {e}")
-
-    p_prefix = safe_key("utask", principal) + "_"
-    try:
-        res = httpx.get(f"{KVDB_URL}/?prefix={p_prefix}", timeout=2.5)
-        if res.status_code == 200:
-            keys = [k.strip() for k in res.text.splitlines() if k.strip()]
-            for k in keys:
-                tid = k[len(p_prefix):]
-                if tid not in tasks_map:
-                    t_rec = db_load_task(tid)
-                    if t_rec and t_rec.get("principal") == principal:
-                        tasks_map[tid] = t_rec["task"]
-    except Exception as e:
-        print(f"db_list_user_tasks kvdb error: {e}")
 
     return list(tasks_map.values())
 
@@ -396,47 +426,58 @@ def heuristic_parse_package(pkg: dict) -> dict:
     if ledger_text:
         paras = [p.strip() for p in ledger_text.split("\n\n") if p.strip()]
         for p in paras:
-            refs = re.findall(r"\[[A-Za-z0-9_]+\]", p)
-            if len(refs) == 3 and not any(r.upper().startswith("[COVER") or r.upper().startswith("[ARC") for r in refs):
+            refs = re.findall(r"\[[A-Za-z0-9_\-:]+\]", p)
+            clean_refs = [r for r in refs if not is_excluded_ref(r)]
+            if len(clean_refs) >= 3:
                 decisive_para = p
-                decisive_refs = refs
+                decisive_refs = clean_refs[:3]
                 break
 
     # If documents gave decisive paragraph, classify action directly from it
     if decisive_para and decisive_refs:
         tl = decisive_para.lower()
         if any(k in tl for k in [
-            "exception queue", "exception case", "exception workflow",
-            "unresolved contractual or valuation contradictions",
+            "exception queue", "exception case", "exception workflow", "exception process",
+            "unresolved contractual", "valuation contradictions",
             "outside the permitted reconciliation tolerance",
             "conflicts with the receiving valuation",
             "material unresolved record conflicts",
-            "does not reconcile with the controlling order"
+            "does not reconcile with the controlling order",
+            "line extension conflicts", "commercial valuation does not agree",
+            "disputed obligation belongs"
         ]):
             chosen_action = "open_exception"
         elif any(k in tl for k in [
             "already been paid", "second disbursement", "earlier settled entry",
-            "duplicate-control policy requires rejection", "same commercial key",
-            "prohibits a second disbursement"
+            "duplicate-control policy", "same commercial key",
+            "prohibits a second disbursement", "bars a second disbursement",
+            "paying the scan again is prohibited", "exact commercial duplicate to rejection",
+            "obligation has been discharged", "completed disbursement references the very billing instrument",
+            "prior ledger transaction closed the purchase", "paid-items ledger contains an earlier posting"
         ]):
             chosen_action = "reject_duplicate"
         elif any(k in tl for k in [
             "pauses release", "forbids remittance", "callback has neither confirmed",
             "out-of-band check is pending", "until the callback closes", "hold invoice",
-            "destination-account change", "payment-change control"
+            "destination-account change", "payment-change control",
+            "freezes payment-detail changes", "independent callback",
+            "newly supplied bank account", "remittance be moved"
         ]):
             chosen_action = "hold_invoice"
         elif any(k in tl for k in [
             "financial-approval workflow", "named approver", "delegation schedule",
             "outside the operator", "exceeds autonomous threshold", "delegation ceiling",
-            "named financial approver", "above that ceiling", "below the stated total"
+            "named financial approver", "above that ceiling", "below the stated total",
+            "authorization threshold", "above this operator"
         ]):
             chosen_action = "request_approval"
         elif any(k in tl for k in [
+            "authorize its payment", "settlement conditions", "independently issued invoice b",
             "clean three-way match", "no prior settlement", "with no exception",
             "same payable total", "accepted-goods record covers",
             "no price, quantity, receipt, duplicate, or bank-detail discrepancy",
-            "agree within the stated rounding tolerance", "no earlier posting"
+            "agree within the stated rounding tolerance", "no earlier posting",
+            "no paid item with this commercial identity"
         ]):
             chosen_action = "settle_invoice"
         else:
@@ -852,6 +893,12 @@ async def handle_message_send(request: Request):
     existing_idem = db_get_idempotency(principal, message_id)
     if existing_idem:
         if existing_idem["msg_hash"] == msg_hash:
+            # Replays of completed/cancelled tasks return the stored terminal Task
+            tid = existing_idem.get("task_id")
+            if tid:
+                t_rec = db_load_task(tid)
+                if t_rec and t_rec.get("state") in ["TASK_STATE_COMPLETED", "TASK_STATE_CANCELLED"]:
+                    return a2a_json_response({"task": t_rec["task"]}, 200)
             return a2a_json_response(json.loads(existing_idem["response_json"]), 200)
         else:
             return a2a_json_response(
