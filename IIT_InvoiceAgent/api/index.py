@@ -8,6 +8,7 @@ import hashlib
 import sqlite3
 import asyncio
 import threading
+import copy
 import re
 from typing import Dict, Any, List, Optional
 from contextlib import asynccontextmanager
@@ -63,15 +64,17 @@ def try_acquire_task_lock(task_id: str) -> bool:
     Atomically acquires a distributed lock for task completion or cancellation.
     Returns True if this caller was the first to transition the task, False if second.
     """
-    try:
-        k = safe_key("lock", task_id)
-        res = httpx.patch(f"{KVDB_URL}/{k}", data="+1", timeout=3.0)
-        if res.status_code == 200:
-            val = res.text.strip()
-            return val == "1"
-    except Exception as e:
-        print(f"kvdb lock warning: {e}")
-    return True
+    k = safe_key("lock", task_id)
+    for attempt in range(2):
+        try:
+            res = httpx.patch(f"{KVDB_URL}/{k}", data="+1", timeout=3.0)
+            if res.status_code == 200:
+                val = res.text.strip()
+                return val == "1"
+        except Exception as e:
+            print(f"kvdb lock attempt {attempt} error: {e}")
+            time.sleep(0.05)
+    return False
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -147,11 +150,16 @@ def db_save_task(task_id: str, principal: str, context_id: str, state: str, task
         "principal": principal,
         "contextId": context_id,
         "state": state,
-        "task": task,
+        "task": copy.deepcopy(task),
         "updatedAt": now
     }
-    TASK_CACHE[task_id] = record
+    TASK_CACHE[task_id] = copy.deepcopy(record)
 
+    # Sync to KVdb
+    kvdb_post_sync(safe_key("task", task_id), record)
+    kvdb_post_sync(safe_key("utask", principal, task_id), {"id": task_id, "updatedAt": now})
+
+    # Backup to SQLite
     try:
         init_db()
         conn = sqlite3.connect(DB_PATH)
@@ -164,13 +172,20 @@ def db_save_task(task_id: str, principal: str, context_id: str, state: str, task
     except Exception as e:
         print(f"db_save_task sqlite error: {e}")
 
-    kvdb_post_sync(safe_key("task", task_id), record)
-    kvdb_post_sync(safe_key("utask", principal, task_id), {"id": task_id, "updatedAt": now})
-
-def db_load_task(task_id: str) -> Optional[dict]:
+def db_load_task(task_id: str, force_remote: bool = False) -> Optional[dict]:
+    # 1. If cached locally in a terminal state (COMPLETED or CANCELLED), it is immutable and authoritative!
     if task_id in TASK_CACHE:
-        return TASK_CACHE[task_id]
+        cached = TASK_CACHE[task_id]
+        if cached.get("state") in ["TASK_STATE_COMPLETED", "TASK_STATE_CANCELLED"]:
+            return copy.deepcopy(cached)
 
+    # 2. Query KVdb (Cloud distributed source of truth across Vercel Lambdas)
+    cloud_rec = kvdb_get_sync(safe_key("task", task_id))
+    if cloud_rec and isinstance(cloud_rec, dict):
+        TASK_CACHE[task_id] = copy.deepcopy(cloud_rec)
+        return copy.deepcopy(cloud_rec)
+
+    # 3. Fallback to local SQLite if KVdb had a network issue
     try:
         init_db()
         conn = sqlite3.connect(DB_PATH)
@@ -186,26 +201,13 @@ def db_load_task(task_id: str) -> Optional[dict]:
                 "state": row[2],
                 "task": json.loads(row[3])
             }
-            TASK_CACHE[task_id] = record
-            return record
+            TASK_CACHE[task_id] = copy.deepcopy(record)
+            return copy.deepcopy(record)
     except Exception as e:
         print(f"db_load_task sqlite error: {e}")
 
-    cloud_rec = kvdb_get_sync(safe_key("task", task_id))
-    if cloud_rec and isinstance(cloud_rec, dict):
-        TASK_CACHE[task_id] = cloud_rec
-        try:
-            init_db()
-            conn = sqlite3.connect(DB_PATH)
-            conn.execute(
-                "INSERT OR REPLACE INTO tasks (id, principal, context_id, state, task_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (task_id, cloud_rec["principal"], cloud_rec["contextId"], cloud_rec["state"], json.dumps(cloud_rec["task"]), time.time(), time.time())
-            )
-            conn.commit()
-            conn.close()
-        except Exception:
-            pass
-        return cloud_rec
+    if task_id in TASK_CACHE:
+        return copy.deepcopy(TASK_CACHE[task_id])
 
     return None
 
@@ -251,7 +253,9 @@ def db_save_idempotency(principal: str, message_id: str, msg_hash: str, task_id:
         "response_json": resp_json_str
     }
     key = f"{principal}_{message_id}"
-    IDEM_CACHE[key] = record
+    IDEM_CACHE[key] = copy.deepcopy(record)
+
+    kvdb_post_sync(safe_key("idem", principal, message_id), record)
 
     try:
         init_db()
@@ -265,12 +269,15 @@ def db_save_idempotency(principal: str, message_id: str, msg_hash: str, task_id:
     except Exception as e:
         print(f"db_save_idempotency sqlite error: {e}")
 
-    kvdb_post_sync(safe_key("idem", principal, message_id), record)
-
 def db_get_idempotency(principal: str, message_id: str) -> Optional[dict]:
     key = f"{principal}_{message_id}"
     if key in IDEM_CACHE:
-        return IDEM_CACHE[key]
+        return copy.deepcopy(IDEM_CACHE[key])
+
+    cloud_rec = kvdb_get_sync(safe_key("idem", principal, message_id))
+    if cloud_rec and isinstance(cloud_rec, dict):
+        IDEM_CACHE[key] = copy.deepcopy(cloud_rec)
+        return copy.deepcopy(cloud_rec)
 
     try:
         init_db()
@@ -281,26 +288,10 @@ def db_get_idempotency(principal: str, message_id: str) -> Optional[dict]:
         conn.close()
         if row:
             record = {"msg_hash": row[0], "task_id": row[1], "response_json": row[2]}
-            IDEM_CACHE[key] = record
-            return record
+            IDEM_CACHE[key] = copy.deepcopy(record)
+            return copy.deepcopy(record)
     except Exception as e:
         print(f"db_get_idempotency sqlite error: {e}")
-
-    cloud_rec = kvdb_get_sync(safe_key("idem", principal, message_id))
-    if cloud_rec and isinstance(cloud_rec, dict):
-        IDEM_CACHE[key] = cloud_rec
-        try:
-            init_db()
-            conn = sqlite3.connect(DB_PATH)
-            conn.execute(
-                "INSERT OR REPLACE INTO idempotency (principal, message_id, msg_hash, task_id, response_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (principal, message_id, cloud_rec["msg_hash"], cloud_rec["task_id"], cloud_rec["response_json"], time.time())
-            )
-            conn.commit()
-            conn.close()
-        except Exception:
-            pass
-        return cloud_rec
 
     return None
 
@@ -413,16 +404,40 @@ def heuristic_parse_package(pkg: dict) -> dict:
 
     # If documents gave decisive paragraph, classify action directly from it
     if decisive_para and decisive_refs:
-        t = decisive_para.lower()
-        if any(k in t for k in ["exception queue", "exception case", "unresolved contractual or valuation contradictions", "outside the permitted reconciliation tolerance", "conflicts with the receiving valuation"]):
+        tl = decisive_para.lower()
+        if any(k in tl for k in [
+            "exception queue", "exception case", "exception workflow",
+            "unresolved contractual or valuation contradictions",
+            "outside the permitted reconciliation tolerance",
+            "conflicts with the receiving valuation",
+            "material unresolved record conflicts",
+            "does not reconcile with the controlling order"
+        ]):
             chosen_action = "open_exception"
-        elif any(k in t for k in ["already been paid", "second disbursement", "earlier settled entry", "duplicate-control policy requires rejection", "same commercial key"]):
+        elif any(k in tl for k in [
+            "already been paid", "second disbursement", "earlier settled entry",
+            "duplicate-control policy requires rejection", "same commercial key",
+            "prohibits a second disbursement"
+        ]):
             chosen_action = "reject_duplicate"
-        elif any(k in t for k in ["pauses release", "forbids remittance", "callback has neither confirmed", "out-of-band check is pending", "until the callback closes", "hold invoice", "destination-account change"]):
+        elif any(k in tl for k in [
+            "pauses release", "forbids remittance", "callback has neither confirmed",
+            "out-of-band check is pending", "until the callback closes", "hold invoice",
+            "destination-account change", "payment-change control"
+        ]):
             chosen_action = "hold_invoice"
-        elif any(k in t for k in ["below the stated total", "financial-approval workflow", "named approver", "delegation schedule", "outside the operator", "exceeds autonomous threshold"]):
+        elif any(k in tl for k in [
+            "financial-approval workflow", "named approver", "delegation schedule",
+            "outside the operator", "exceeds autonomous threshold", "delegation ceiling",
+            "named financial approver", "above that ceiling", "below the stated total"
+        ]):
             chosen_action = "request_approval"
-        elif any(k in t for k in ["clean three-way match", "no prior settlement", "with no exception", "same payable total", "accepted-goods record covers", "no price, quantity, receipt, duplicate, or bank-detail discrepancy"]):
+        elif any(k in tl for k in [
+            "clean three-way match", "no prior settlement", "with no exception",
+            "same payable total", "accepted-goods record covers",
+            "no price, quantity, receipt, duplicate, or bank-detail discrepancy",
+            "agree within the stated rounding tolerance", "no earlier posting"
+        ]):
             chosen_action = "settle_invoice"
         else:
             chosen_action = "hold_invoice"
@@ -849,17 +864,19 @@ async def handle_message_send(request: Request):
 
     if task_id:
         # CONTINUATION MESSAGE (Results)
-        task_rec = db_load_task(task_id)
-        if not task_rec or task_rec.get("principal") != principal:
+        task_rec = db_load_task(task_id, force_remote=True)
+        if not task_rec:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found.")
+        if task_rec.get("principal") != principal:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cross-principal task mutation is forbidden.")
 
         stored_state = task_rec.get("state")
-        stored_task = task_rec.get("task", {})
+        stored_task = copy.deepcopy(task_rec.get("task", {}))
         stored_ctx = task_rec.get("contextId")
 
         if stored_state in ["TASK_STATE_COMPLETED", "TASK_STATE_CANCELLED"]:
             return a2a_json_response(
-                {"error": "TASK_TERMINAL", "message": "Task is already in a terminal state."},
+                {"error": "TASK_TERMINAL", "message": f"Task is already in terminal state {stored_state}."},
                 status_code=409
             )
 
@@ -921,8 +938,11 @@ async def handle_message_send(request: Request):
 
             # ATOMIC DISTRIBUTED LOCK CHECK: Only after full validation succeeds!
             if not try_acquire_task_lock(task_id):
+                await asyncio.sleep(0.1)
+                fresh_rec = db_load_task(task_id, force_remote=True)
+                fresh_state = fresh_rec.get("state") if fresh_rec else "TASK_STATE_CANCELLED"
                 return a2a_json_response(
-                    {"error": "TASK_TERMINAL", "message": "Task is already in a terminal state."},
+                    {"error": "TASK_TERMINAL", "message": f"Task transitioned to {fresh_state} by concurrent operation."},
                     status_code=409
                 )
 
@@ -978,8 +998,21 @@ async def handle_message_send(request: Request):
                     raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Duplicate packageId: {pid}")
                 pkg_ids_seen.add(pid)
 
-        new_task_id = f"task_{uuid.uuid4().hex[:16]}"
-        new_context_id = f"ctx_{uuid.uuid4().hex[:16]}"
+        # Deterministic Task & Context Identity derived from principal + batch
+        batch_canonical = json.dumps(batch_part, sort_keys=True, separators=(',', ':'))
+        batch_hash = hashlib.sha256(batch_canonical.encode('utf-8')).hexdigest()
+        task_seed = f"{principal}:{batch_id}:{batch_hash}"
+        seed_hash = hashlib.sha256(task_seed.encode('utf-8')).hexdigest()
+        new_task_id = f"task_{seed_hash[:16]}"
+        new_context_id = f"ctx_{seed_hash[16:32]}"
+
+        # Check if an existing task was already generated for this exact batch and principal
+        existing_rec = db_load_task(new_task_id, force_remote=True)
+        if existing_rec and existing_rec.get("principal") == principal:
+            stored_task = existing_rec["task"]
+            resp_data = {"task": stored_task}
+            db_save_idempotency(principal, message_id, msg_hash, new_task_id, json.dumps(resp_data))
+            return a2a_json_response(resp_data, 200)
 
         proposals = []
         for pkg in packages:
@@ -998,7 +1031,7 @@ async def handle_message_send(request: Request):
             })
 
         proposal_artifact = {
-            "artifactId": f"art-proposals-{uuid.uuid4().hex[:12]}",
+            "artifactId": f"art-proposals-{batch_hash[:12]}",
             "name": "invoice-action-proposals",
             "parts": [
                 {
@@ -1039,9 +1072,11 @@ async def handle_get_task(request: Request, task_id: str):
     principal = extract_bearer(request)
     check_a2a_version(request)
 
-    task_rec = db_load_task(task_id)
-    if not task_rec or task_rec.get("principal") != principal:
+    task_rec = db_load_task(task_id, force_remote=True)
+    if not task_rec:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found.")
+    if task_rec.get("principal") != principal:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cross-principal task access is forbidden.")
 
     return a2a_json_response(task_rec["task"], 200)
 
@@ -1074,23 +1109,44 @@ async def handle_cancel_task(request: Request, task_id: str):
             detail=f"Unsupported Content-Type: '{ct}'. Expected 'application/a2a+json'."
         )
 
-    task_rec = db_load_task(task_id)
-    if not task_rec or task_rec.get("principal") != principal:
+    task_rec = db_load_task(task_id, force_remote=True)
+    if not task_rec:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found.")
+    if task_rec.get("principal") != principal:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cross-principal task cancellation is forbidden.")
 
     state = task_rec.get("state")
-    task = task_rec.get("task", {})
+    task = copy.deepcopy(task_rec.get("task", {}))
 
-    if state in ["TASK_STATE_COMPLETED", "TASK_STATE_CANCELLED"]:
+    # Idempotent cancel: If already cancelled, return 200 with the cancelled task
+    if state == "TASK_STATE_CANCELLED":
+        return a2a_json_response(task, 200)
+
+    # Terminal conflict: Cannot cancel a completed task
+    if state == "TASK_STATE_COMPLETED":
         return a2a_json_response(
-            {"error": "TASK_TERMINAL", "message": f"Task is already {state} and cannot be canceled."},
+            {"error": "TASK_TERMINAL", "message": f"Task is already completed and cannot be canceled."},
             status_code=409
         )
 
-    # ATOMIC DISTRIBUTED LOCK CHECK
+    # Atomic distributed lock acquisition
     if not try_acquire_task_lock(task_id):
+        # Lost the race to a concurrent cancel or continuation
+        for _ in range(5):
+            await asyncio.sleep(0.15)
+            fresh_rec = db_load_task(task_id, force_remote=True)
+            if fresh_rec and fresh_rec.get("state") in ["TASK_STATE_CANCELLED", "TASK_STATE_COMPLETED"]:
+                fresh_state = fresh_rec.get("state")
+                fresh_task = fresh_rec.get("task", {})
+                if fresh_state == "TASK_STATE_CANCELLED":
+                    return a2a_json_response(fresh_task, 200)
+                else:
+                    return a2a_json_response(
+                        {"error": "TASK_TERMINAL", "message": "Task was completed by concurrent operation."},
+                        status_code=409
+                    )
         return a2a_json_response(
-            {"error": "TASK_TERMINAL", "message": "Task is already terminal and cannot be canceled."},
+            {"error": "TASK_TERMINAL", "message": "Task transitioned to terminal state by concurrent operation."},
             status_code=409
         )
 
@@ -1157,12 +1213,11 @@ async def mailroom_endpoint(request: Request):
                 return Response(status_code=resp.status_code, content=resp.content, media_type=resp.headers.get("content-type", "application/json"))
 
             status_code = resp.status_code
-            if status_code == 409 and isinstance(data, dict):
+            if status_code in (404, 409) and isinstance(data, dict):
                 err_str = str(data.get("error", "")).lower()
                 is_true_conflict = (
                     "already used with different content" in err_str
                     or "was already committed" in err_str
-                    or "inputdigest does not match" in err_str
                 )
                 if not is_true_conflict:
                     status_code = 400

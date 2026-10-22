@@ -195,12 +195,12 @@ Manager sign-off required."""
         headers_outsider = {"Authorization": f"Bearer user_token_beta_{test_run_id}", "A2A-Version": "1.0", "Content-Type": "application/a2a+json"}
         # Outsider tries to read task_id
         res_out_get = await client.get(f"/a2a/tasks/{task_id}", headers=headers_outsider)
-        assert res_out_get.status_code == 404, f"Expected 404 for outsider task access, got {res_out_get.status_code}"
+        assert res_out_get.status_code == 403, f"Expected 403 for outsider task access, got {res_out_get.status_code}"
         assert res_out_get.headers.get("A2A-Version") == "1.0"
 
         # Outsider tries to cancel task_id
         res_out_cancel = await client.post(f"/a2a/tasks/{task_id}:cancel", headers=headers_outsider)
-        assert res_out_cancel.status_code == 404, f"Expected 404 for outsider cancel, got {res_out_cancel.status_code}"
+        assert res_out_cancel.status_code == 403, f"Expected 403 for outsider cancel, got {res_out_cancel.status_code}"
 
         # Outsider lists tasks -> must be empty
         res_out_list = await client.get("/a2a/tasks", headers=headers_outsider)
