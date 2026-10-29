@@ -286,7 +286,7 @@ Manager sign-off required."""
         cancel_res = await client.post(f"/a2a/tasks/{fresh_task_id}:cancel", headers=headers1)
         assert cancel_res.status_code == 200
         cancelled_task = cancel_res.json()
-        assert cancelled_task["status"]["state"] == "TASK_STATE_CANCELLED"
+        assert cancelled_task["status"]["state"] in ["TASK_STATE_CANCELED", "TASK_STATE_CANCELLED"]
 
         # Now attempt continuation on cancelled task -> must return 409
         bad_cont = await client.post("/a2a/message:send", headers=headers1, content=json.dumps({

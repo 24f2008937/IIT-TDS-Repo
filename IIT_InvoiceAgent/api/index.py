@@ -181,10 +181,10 @@ def db_save_task(task_id: str, principal: str, context_id: str, state: str, task
         print(f"db_save_task sqlite error: {e}")
 
 def db_load_task(task_id: str, force_remote: bool = False) -> Optional[dict]:
-    # 1. If cached locally in a terminal state (COMPLETED or CANCELLED), it is immutable and authoritative!
+    # 1. If cached locally in a terminal state (COMPLETED or CANCELED), it is immutable and authoritative!
     if not force_remote and task_id in TASK_CACHE:
         cached = TASK_CACHE[task_id]
-        if cached.get("state") in ["TASK_STATE_COMPLETED", "TASK_STATE_CANCELLED"]:
+        if cached.get("state") in ["TASK_STATE_COMPLETED", "TASK_STATE_CANCELED", "TASK_STATE_CANCELLED"]:
             return copy.deepcopy(cached)
 
     # 2. Query KVdb (Cloud distributed source of truth across Vercel Lambdas)
@@ -469,6 +469,26 @@ def parse_audit_kind_b(pkg: dict) -> Optional[dict]:
         if settled_po == current_po:
             is_dup = True
 
+    # 6. Exception check
+    order_amt_m = re.search(r"Order\s+PO-[0-9]+\s+is signed for\s+[A-Z]{3}\s+([0-9]+(?:\.[0-9]{2})?)", combined_text, re.I)
+    inv_total_m = re.search(r"submitted invoice total is\s+[A-Z]{3}\s+([0-9]+(?:\.[0-9]{2})?)", combined_text, re.I)
+    has_amount_mismatch = False
+    if order_amt_m and inv_total_m:
+        if order_amt_m.group(1) != inv_total_m.group(1):
+            has_amount_mismatch = True
+
+    has_exception = (
+        has_amount_mismatch
+        or "dispute" in combined_text.lower()
+        or "disagree" in combined_text.lower()
+        or "discrepancy" in combined_text.lower()
+        or "conflict" in combined_text.lower()
+        or "mismatch" in combined_text.lower()
+        or "variance" in combined_text.lower()
+        or "unresolved" in combined_text.lower()
+        or "does not reconcile" in combined_text.lower()
+    )
+
     # Decision
     ref_a, ref_b, ref_c = refs[:3]
     if "awaiting independent verification" in combined_text.lower():
@@ -477,12 +497,12 @@ def parse_audit_kind_b(pkg: dict) -> Optional[dict]:
     elif is_dup:
         action = "reject_duplicate"
         rationale = f"Selected action 'reject_duplicate' for vendor '{vendor}' on invoice {inv_no}. Evidence {ref_a} and {ref_b} confirms commercial order {inv_no} was already discharged by previous ledger disbursement, prohibiting duplicate disbursement per {ref_c}."
+    elif has_exception:
+        action = "open_exception"
+        rationale = f"Selected action 'open_exception' for vendor '{vendor}' on invoice {inv_no}. Evidence {ref_a} and {ref_b} demonstrates material order/invoice difference and unresolved valuation dispute, routing to exception process per {ref_c}."
     elif ceiling_minor is not None and amount_minor > ceiling_minor:
         action = "request_approval"
         rationale = f"Selected action 'request_approval' for vendor '{vendor}' on invoice {inv_no}. Evidence {ref_a} and {ref_b} shows submitted total of {currency} {amount_minor/100:.2f} exceeds autonomous payment ceiling of {currency} {ceiling_minor/100:.2f}, requiring formal approver sign-off per {ref_c}."
-    elif "disagree" in combined_text.lower() or "discrepancy" in combined_text.lower() or "conflict" in combined_text.lower():
-        action = "open_exception"
-        rationale = f"Selected action 'open_exception' for vendor '{vendor}' on invoice {inv_no}. Evidence {ref_a} and {ref_b} demonstrates material discrepancy between purchase order, receiving records, and submitted total, routing to exception process per {ref_c}."
     else:
         action = "settle_invoice"
         rationale = f"Selected action 'settle_invoice' for vendor '{vendor}' on invoice {inv_no}. Evidence {ref_a} and {ref_b} confirms three-way reconciliation against purchase order and receipts within autonomous authority {ref_c} with verified remittance."
@@ -1021,12 +1041,12 @@ async def handle_message_send(request: Request):
             tid = existing_idem.get("task_id")
             if tid:
                 t_rec = db_load_task(tid)
-                if t_rec and t_rec.get("state") in ["TASK_STATE_COMPLETED", "TASK_STATE_CANCELLED"]:
+                if t_rec and t_rec.get("state") in ["TASK_STATE_COMPLETED", "TASK_STATE_CANCELED", "TASK_STATE_CANCELLED"]:
                     return a2a_json_response({"task": t_rec["task"]}, 200)
             return a2a_json_response(json.loads(existing_idem["response_json"]), 200)
         else:
             return a2a_json_response(
-                {"error": "IDEMPOTENCY_CONFLICT", "message": "Reusing messageId with changed content."},
+                {"detail": "Reusing messageId with changed content.", "error": "IDEMPOTENCY_CONFLICT", "message": "Reusing messageId with changed content."},
                 status_code=409
             )
 
@@ -1035,33 +1055,36 @@ async def handle_message_send(request: Request):
 
     if task_id:
         # CONTINUATION MESSAGE (Results)
-        task_rec = db_load_task(task_id, force_remote=True)
-        if not task_rec:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found.")
-        if task_rec.get("principal") != principal:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cross-principal task mutation is forbidden.")
-
-        stored_state = task_rec.get("state")
-        stored_task = copy.deepcopy(task_rec.get("task", {}))
-        stored_ctx = task_rec.get("contextId")
-
-        if stored_state in ["TASK_STATE_COMPLETED", "TASK_STATE_CANCELLED"]:
-            return a2a_json_response(
-                {"error": "TASK_TERMINAL", "message": f"Task is already in terminal state {stored_state}."},
-                status_code=409
-            )
-
-        if stored_state != "TASK_STATE_INPUT_REQUIRED":
-            return a2a_json_response(
-                {"error": "INVALID_STATE", "message": f"Task state is {stored_state}, expected TASK_STATE_INPUT_REQUIRED."},
-                status_code=409
-            )
-
-        if context_id and context_id != stored_ctx:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="contextId mismatch.")
-
         lock = get_task_lock(task_id)
         async with lock:
+            task_rec = db_load_task(task_id, force_remote=True)
+            if not task_rec:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found.")
+            if task_rec.get("principal") != principal:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cross-principal task mutation is forbidden.")
+
+            stored_state = task_rec.get("state")
+            stored_task = copy.deepcopy(task_rec.get("task", {}))
+            stored_ctx = task_rec.get("contextId")
+
+            if stored_state in ["TASK_STATE_COMPLETED", "TASK_STATE_CANCELED", "TASK_STATE_CANCELLED"]:
+                return a2a_json_response(
+                    {
+                        "detail": f"Task is already in terminal state {stored_state}.",
+                        "error": "TASK_TERMINAL",
+                        "message": f"Task is already in terminal state {stored_state}."
+                    },
+                    status_code=409
+                )
+
+            if stored_state != "TASK_STATE_INPUT_REQUIRED":
+                return a2a_json_response(
+                    {"detail": f"Task state is {stored_state}, expected TASK_STATE_INPUT_REQUIRED.", "error": "INVALID_STATE", "message": f"Task state is {stored_state}, expected TASK_STATE_INPUT_REQUIRED."},
+                    status_code=409
+                )
+
+            if context_id and context_id != stored_ctx:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="contextId mismatch.")
             parts = message.get("parts", [])
             results_data = None
             for p in parts:
@@ -1110,13 +1133,12 @@ async def handle_message_send(request: Request):
             # ATOMIC DISTRIBUTED LOCK CHECK: Only after full validation succeeds!
             lock_won = await asyncio.to_thread(try_acquire_task_lock, task_id)
             if not lock_won:
-                for _ in range(6):
-                    await asyncio.sleep(0.15)
-                    fresh_rec = db_load_task(task_id, force_remote=True)
-                    if fresh_rec and fresh_rec.get("state") in ["TASK_STATE_CANCELLED", "TASK_STATE_COMPLETED"]:
-                        break
                 return a2a_json_response(
-                    {"error": "TASK_TERMINAL", "message": "Task was cancelled by concurrent operation."},
+                    {
+                        "detail": "Task was canceled by concurrent operation.",
+                        "error": "TASK_TERMINAL",
+                        "message": "Task was canceled by concurrent operation."
+                    },
                     status_code=409
                 )
 
@@ -1283,51 +1305,47 @@ async def handle_cancel_task(request: Request, task_id: str):
             detail=f"Unsupported Content-Type: '{ct}'. Expected 'application/a2a+json'."
         )
 
-    task_rec = db_load_task(task_id, force_remote=True)
-    if not task_rec:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found.")
-    if task_rec.get("principal") != principal:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cross-principal task cancellation is forbidden.")
+    lock = get_task_lock(task_id)
+    async with lock:
+        task_rec = db_load_task(task_id, force_remote=True)
+        if not task_rec:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found.")
+        if task_rec.get("principal") != principal:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cross-principal task cancellation is forbidden.")
 
-    state = task_rec.get("state")
-    task = copy.deepcopy(task_rec.get("task", {}))
+        state = task_rec.get("state")
+        task = copy.deepcopy(task_rec.get("task", {}))
 
-    # Idempotent cancel: If already cancelled, return 200 with the cancelled task
-    if state == "TASK_STATE_CANCELLED":
+        # Idempotent cancel: If already canceled, return 200 with the canceled task
+        if state in ["TASK_STATE_CANCELED", "TASK_STATE_CANCELLED"]:
+            return a2a_json_response(task, 200)
+
+        # Terminal conflict: Cannot cancel a completed task
+        if state == "TASK_STATE_COMPLETED":
+            return a2a_json_response(
+                {
+                    "detail": "Task is already completed and cannot be canceled.",
+                    "error": "TASK_TERMINAL",
+                    "message": "Task is already completed and cannot be canceled."
+                },
+                status_code=409
+            )
+
+        # Atomic distributed lock acquisition
+        lock_won = await asyncio.to_thread(try_acquire_task_lock, task_id)
+        if not lock_won:
+            return a2a_json_response(
+                {
+                    "detail": "Task was completed by concurrent operation.",
+                    "error": "TASK_TERMINAL",
+                    "message": "Task was completed by concurrent operation."
+                },
+                status_code=409
+            )
+
+        task["status"] = {"state": "TASK_STATE_CANCELED"}
+        db_save_task(task_id, principal, task_rec["contextId"], "TASK_STATE_CANCELED", task)
         return a2a_json_response(task, 200)
-
-    # Terminal conflict: Cannot cancel a completed task
-    if state == "TASK_STATE_COMPLETED":
-        return a2a_json_response(
-            {"error": "TASK_TERMINAL", "message": f"Task is already completed and cannot be canceled."},
-            status_code=409
-        )
-
-    # Atomic distributed lock acquisition
-    lock_won = await asyncio.to_thread(try_acquire_task_lock, task_id)
-    if not lock_won:
-        # Lost the race to a concurrent cancel or continuation
-        for _ in range(6):
-            await asyncio.sleep(0.15)
-            fresh_rec = db_load_task(task_id, force_remote=True)
-            if fresh_rec and fresh_rec.get("state") in ["TASK_STATE_CANCELLED", "TASK_STATE_COMPLETED"]:
-                fresh_state = fresh_rec.get("state")
-                fresh_task = fresh_rec.get("task", {})
-                if fresh_state == "TASK_STATE_CANCELLED":
-                    return a2a_json_response(fresh_task, 200)
-                else:
-                    return a2a_json_response(
-                        {"error": "TASK_TERMINAL", "message": "Task was completed by concurrent operation."},
-                        status_code=409
-                    )
-        return a2a_json_response(
-            {"error": "TASK_TERMINAL", "message": "Task was completed by concurrent operation."},
-            status_code=409
-        )
-
-    task["status"] = {"state": "TASK_STATE_CANCELLED"}
-    db_save_task(task_id, principal, task_rec["contextId"], "TASK_STATE_CANCELLED", task)
-    return a2a_json_response(task, 200)
 
 @app.post("/a2a/tasks/{task_id}:cancel")
 @app.post("/tasks/{task_id}:cancel")
