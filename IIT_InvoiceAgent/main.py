@@ -45,17 +45,24 @@ def kvdb_post_bg(key: str, data: Any):
     threading.Thread(target=_run, daemon=True).start()
 
 def kvdb_post_sync(key: str, data: Any):
-    try:
-        httpx.post(f"{KVDB_URL}/{key}", json=data, timeout=3.0)
-    except Exception as e:
-        print(f"kvdb_post_sync error: {e}")
+    for attempt in range(2):
+        try:
+            res = httpx.post(f"{KVDB_URL}/{key}", json=data, timeout=5.0)
+            if res.status_code == 200:
+                return True
+        except Exception as e:
+            print(f"kvdb_post_sync attempt {attempt} error: {e}")
+            time.sleep(0.05)
+    return False
 
 def kvdb_get_sync(key: str) -> Optional[Any]:
     for attempt in range(2):
         try:
-            res = httpx.get(f"{KVDB_URL}/{key}", timeout=3.5)
+            res = httpx.get(f"{KVDB_URL}/{key}", timeout=5.0)
             if res.status_code == 200:
                 return res.json()
+            elif res.status_code == 404:
+                return None
         except Exception as e:
             print(f"kvdb_get_sync attempt {attempt} error: {e}")
             time.sleep(0.05)
@@ -67,15 +74,19 @@ def try_acquire_task_lock(task_id: str) -> bool:
     Returns True if this caller was the first to transition the task, False if second.
     """
     k = safe_key("lock", task_id)
-    for attempt in range(2):
+    try:
+        res = httpx.patch(f"{KVDB_URL}/{k}", data="+1", timeout=5.0)
+        if res.status_code == 200:
+            val = res.text.strip()
+            return val == "1"
+    except Exception as e:
+        print(f"kvdb lock attempt error: {e}")
         try:
-            res = httpx.patch(f"{KVDB_URL}/{k}", data="+1", timeout=3.0)
-            if res.status_code == 200:
-                val = res.text.strip()
-                return val == "1"
-        except Exception as e:
-            print(f"kvdb lock attempt {attempt} error: {e}")
-            time.sleep(0.05)
+            chk = httpx.get(f"{KVDB_URL}/{k}", timeout=3.0)
+            if chk.status_code == 200 and chk.text.strip() == "1":
+                return True
+        except Exception:
+            pass
     return False
 
 def init_db():
@@ -193,6 +204,10 @@ def db_load_task(task_id: str, force_remote: bool = False) -> Optional[dict]:
         TASK_CACHE[task_id] = copy.deepcopy(cloud_rec)
         return copy.deepcopy(cloud_rec)
 
+    # Fallback to local memory cache if KVdb had a momentary network timeout
+    if task_id in TASK_CACHE:
+        return copy.deepcopy(TASK_CACHE[task_id])
+
     # 3. Fallback to local SQLite if KVdb had a network issue
     try:
         init_db()
@@ -226,16 +241,22 @@ def db_list_user_tasks(principal: str) -> List[dict]:
     for tid, rec in TASK_CACHE.items():
         if rec.get("principal") == principal:
             t = rec.get("task", {})
+            ctx = rec.get("contextId") or t.get("contextId")
+            if not ctx:
+                continue
+            raw_state = rec.get("state") or t.get("status", {}).get("state", "TASK_STATE_INPUT_REQUIRED")
+            clean_state = "TASK_STATE_CANCELED" if raw_state in ["TASK_STATE_CANCELED", "TASK_STATE_CANCELLED"] else raw_state
             tasks_map[tid] = {
                 "id": tid,
-                "contextId": rec.get("contextId", t.get("contextId", "")),
-                "status": t.get("status", {"state": rec.get("state", "TASK_STATE_INPUT_REQUIRED")})
+                "contextId": ctx,
+                "status": {"state": clean_state},
+                "updatedAt": rec.get("updatedAt", 0)
             }
 
     # 2. KVdb single batch fetch via values=true (fast & compact)
     p_prefix = safe_key("utask", principal) + "_"
     try:
-        res = httpx.get(f"{KVDB_URL}/?prefix={p_prefix}&values=true", timeout=3.5)
+        res = httpx.get(f"{KVDB_URL}/?prefix={p_prefix}&values=true", timeout=5.0)
         if res.status_code == 200:
             for line in res.text.splitlines():
                 line = line.strip()
@@ -245,11 +266,15 @@ def db_list_user_tasks(principal: str) -> List[dict]:
                 try:
                     v = json.loads(v_str)
                     tid = v.get("id")
-                    if tid and tid not in tasks_map:
+                    ctx = v.get("contextId")
+                    if tid and ctx:
+                        raw_state = v.get("status", {}).get("state", "TASK_STATE_COMPLETED")
+                        clean_state = "TASK_STATE_CANCELED" if raw_state in ["TASK_STATE_CANCELED", "TASK_STATE_CANCELLED"] else raw_state
                         tasks_map[tid] = {
                             "id": tid,
-                            "contextId": v.get("contextId", ""),
-                            "status": v.get("status", {"state": "TASK_STATE_COMPLETED"})
+                            "contextId": ctx,
+                            "status": {"state": clean_state},
+                            "updatedAt": v.get("updatedAt", 0)
                         }
                 except Exception:
                     pass
@@ -261,20 +286,33 @@ def db_list_user_tasks(principal: str) -> List[dict]:
         init_db()
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
-        cur.execute("SELECT id, context_id, state FROM tasks WHERE principal = ? ORDER BY created_at DESC", (principal,))
+        cur.execute("SELECT id, context_id, state, updated_at FROM tasks WHERE principal = ? ORDER BY created_at DESC", (principal,))
         for row in cur.fetchall():
             tid = row[0]
-            if tid not in tasks_map:
+            ctx = row[1]
+            if tid not in tasks_map and ctx:
+                raw_state = row[2]
+                clean_state = "TASK_STATE_CANCELED" if raw_state in ["TASK_STATE_CANCELED", "TASK_STATE_CANCELLED"] else raw_state
                 tasks_map[tid] = {
                     "id": tid,
-                    "contextId": row[1],
-                    "status": {"state": row[2]}
+                    "contextId": ctx,
+                    "status": {"state": clean_state},
+                    "updatedAt": row[3] if len(row) > 3 else 0
                 }
         conn.close()
     except Exception as e:
         print(f"db_list_user_tasks sqlite error: {e}")
 
-    return list(tasks_map.values())
+    # Sort by updatedAt descending and return top 15 compact tasks
+    sorted_tasks = sorted(tasks_map.values(), key=lambda x: x.get("updatedAt", 0), reverse=True)
+    clean_list = []
+    for item in sorted_tasks[:15]:
+        clean_list.append({
+            "id": item["id"],
+            "contextId": item["contextId"],
+            "status": item["status"]
+        })
+    return clean_list
 
 def db_save_idempotency(principal: str, message_id: str, msg_hash: str, task_id: str, resp_json_str: str):
     record = {
@@ -838,14 +876,7 @@ def heuristic_parse_package(pkg: dict) -> dict:
     }
 
 async def evaluate_package_with_ai(pkg: dict) -> dict:
-    pkg_hash = compute_canonical_hash(pkg)
-    cached = get_cached_decision(pkg_hash)
-    if cached:
-        return cached
-
-    decision = heuristic_parse_package(pkg)
-    save_cached_decision(pkg_hash, decision)
-    return decision
+    return heuristic_parse_package(pkg)
 
 
 # ---------------------------------------------------------------------------
@@ -1274,7 +1305,11 @@ async def handle_get_task(request: Request, task_id: str):
     if task_rec.get("principal") != principal:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cross-principal task access is forbidden.")
 
-    return a2a_json_response(task_rec["task"], 200)
+    task = copy.deepcopy(task_rec["task"])
+    if task.get("status", {}).get("state") in ["TASK_STATE_CANCELED", "TASK_STATE_CANCELLED"]:
+        task["status"]["state"] = "TASK_STATE_CANCELED"
+
+    return a2a_json_response(task, 200)
 
 @app.get("/a2a/tasks/{task_id}")
 @app.get("/tasks/{task_id}")
@@ -1318,6 +1353,7 @@ async def handle_cancel_task(request: Request, task_id: str):
 
         # Idempotent cancel: If already canceled, return 200 with the canceled task
         if state in ["TASK_STATE_CANCELED", "TASK_STATE_CANCELLED"]:
+            task["status"] = {"state": "TASK_STATE_CANCELED"}
             return a2a_json_response(task, 200)
 
         # Terminal conflict: Cannot cancel a completed task
